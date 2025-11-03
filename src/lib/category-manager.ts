@@ -9,6 +9,7 @@ import { superTypes, ArtworkOnlyType } from "./parsers/available-parsers";
 import * as path from "path";
 import * as fs from "fs-extra";
 import * as _ from "lodash";
+import * as os from "os";
 import { Acceptable_Error } from "./acceptable-error";
 
 export class CategoryManager {
@@ -55,27 +56,84 @@ export class CategoryManager {
     // Check if Steam is running - we cannot safely modify the file if it is
     const { execSync } = require('child_process');
     try {
-      const processes = execSync('ps aux', { encoding: 'utf-8' });
-      const steamProcesses = processes.split('\n').filter((line: string) => {
-        const lower = line.toLowerCase();
-        // Must contain 'steam'
-        if (!lower.includes('steam')) return false;
+      let steamProcesses: string[] = [];
+      const osType = os.type();
 
-        // Exclude: grep, SRM itself, SteamOS system services, other tools
-        const excludePatterns = [
-          'grep',
-          'avahi-daemon',
-          'steam-rom-manager',
-          'steam rom manager',
-          'steamos-',           // SteamOS system services (steamos-manager, steamos_log_submitter, etc.)
-          'steamgriddb',        // Decky plugin
-          'sddm',               // Display manager
-          '/usr/lib/steamos',   // SteamOS system paths
-          '/usr/bin/python',    // Python scripts (steamos_log_submitter)
-        ];
+      if (osType === "Windows_NT") {
+        // Windows: Use PowerShell Get-Process
+        try {
+          const result = execSync(
+            'powershell -Command "Get-Process | Where-Object {$_.ProcessName -like \'*steam*\'} | Select-Object -ExpandProperty ProcessName"',
+            { encoding: 'utf-8' }
+          );
+          
+          if (result && result.trim()) {
+            const processes = result.trim().split('\n').map((p: string) => p.trim().toLowerCase());
+            
+            // Exclude SRM itself and other non-Steam processes
+            const excludePatterns = [
+              'steam-rom-manager',
+              'steamrom',
+            ];
+            
+            steamProcesses = processes.filter((processName: string) => {
+              return !excludePatterns.some(pattern => processName.includes(pattern));
+            });
+          }
+        } catch (winError) {
+          // If PowerShell fails, try tasklist
+          try {
+            const result = execSync('tasklist /FI "IMAGENAME eq steam.exe"', { encoding: 'utf-8' });
+            if (result && result.toLowerCase().includes('steam.exe')) {
+              steamProcesses = ['steam.exe'];
+            }
+          } catch (tasklistError) {
+            console.log('Could not check for Steam processes on Windows:', tasklistError.message);
+          }
+        }
+      } else if (osType === "Linux") {
+        // Linux: Use ps aux
+        const processes = execSync('ps aux', { encoding: 'utf-8' });
+        steamProcesses = processes.split('\n').filter((line: string) => {
+          const lower = line.toLowerCase();
+          // Must contain 'steam'
+          if (!lower.includes('steam')) return false;
 
-        return !excludePatterns.some(pattern => lower.includes(pattern));
-      });
+          // Exclude: grep, SRM itself, SteamOS system services, other tools
+          const excludePatterns = [
+            'grep',
+            'avahi-daemon',
+            'steam-rom-manager',
+            'steam rom manager',
+            'steamos-',           // SteamOS system services (steamos-manager, steamos_log_submitter, etc.)
+            'steamgriddb',        // Decky plugin
+            'sddm',               // Display manager
+            '/usr/lib/steamos',   // SteamOS system paths
+            '/usr/bin/python',    // Python scripts (steamos_log_submitter)
+          ];
+
+          return !excludePatterns.some(pattern => lower.includes(pattern));
+        });
+      } else if (osType === "Darwin") {
+        // macOS: Use ps aux or pgrep
+        try {
+          const processes = execSync('ps aux', { encoding: 'utf-8' });
+          steamProcesses = processes.split('\n').filter((line: string) => {
+            const lower = line.toLowerCase();
+            if (!lower.includes('steam')) return false;
+
+            const excludePatterns = [
+              'grep',
+              'steam-rom-manager',
+              'steam rom manager',
+            ];
+
+            return !excludePatterns.some(pattern => lower.includes(pattern));
+          });
+        } catch (macError) {
+          console.log('Could not check for Steam processes on macOS:', macError.message);
+        }
+      }
 
       if (steamProcesses.length > 0) {
         throw new Error(
@@ -88,10 +146,10 @@ export class CategoryManager {
         );
       }
     } catch (error) {
-      if (error.message.includes('Steam is currently running')) {
+      if (error.message && error.message.includes('Steam is currently running')) {
         throw error;
       }
-      // If ps command fails (e.g., on Windows), log but continue
+      // If command fails for other reasons, log but continue
       console.log('Could not check for Steam processes:', error.message);
     }
 
